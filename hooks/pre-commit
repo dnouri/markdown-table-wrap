@@ -1,0 +1,5 @@
+#!/bin/bash
+# Git pre-commit hook for markdown-table-wrap
+# Runs byte-compilation, lint, and tests before allowing commits
+
+exec ./scripts/check.sh

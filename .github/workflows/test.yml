@@ -1,0 +1,22 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    name: Emacs ${{ matrix.emacs }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['28.2', '29.4', '30.1']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      - name: Byte-compile
+        run: make compile
+      - name: Lint
+        if: matrix.emacs == '30.1'
+        run: make lint
+      - name: Run tests
+        run: make test

@@ -1,0 +1,7 @@
+*.elc
+*~
+\#*\#
+*.orig
+TODO.md
+tmp/
+.deps-stamp

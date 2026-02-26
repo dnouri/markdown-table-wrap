@@ -1,0 +1,144 @@
+#+title: markdown-table-wrap
+#+author: Daniel Nouri
+
+#+html: <a href="https://github.com/dnouri/markdown-table-wrap/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/dnouri/markdown-table-wrap/actions/workflows/test.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/markdown-table-wrap/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/markdown-table-wrap/actions/workflows/melpazoid.yml/badge.svg"/></a>
+
+Word-wrap GFM (GitHub Flavored Markdown) pipe tables to fit a
+given character width.  Inline markup survives wrapping.
+
+#+begin_example
+| Feature   | Status | Notes                         |
+|-----------|--------|-------------------------------|
+| **Auth**  | Done   | OAuth2 with `refresh tokens`  |
+| **DB**    | WIP    | PostgreSQL *connection pool*  |
+#+end_example
+
+=(markdown-table-wrap table-string 36)= rewrites this as:
+
+#+begin_example
+| Feature  | Status | Notes        |
+| -------- | ------ | ------------ |
+| **Auth** | Done   | OAuth2 with  |
+|          |        | `refresh`    |
+|          |        | `tokens`     |
+|          |        |              |
+| **DB**   | WIP    | PostgreSQL   |
+|          |        | *connection* |
+|          |        | *pool*       |
+#+end_example
+
+The output is valid GFM.  Bold, italic, code, links, images, and
+strikethrough markers are duplicated on each continuation line.
+When wrapping produces multi-line rows, empty rows are inserted
+between data rows for readability.  In buffers where
+=markdown-hide-markup= conceals syntax characters, column widths
+can be measured from visible text so that hidden markers do not
+waste space.
+
+* Installation
+
+#+begin_src elisp
+(add-to-list 'load-path "/path/to/markdown-table-wrap")
+(require 'markdown-table-wrap)
+#+end_src
+
+* Usage
+
+#+begin_src elisp
+(markdown-table-wrap table-text 60)
+#+end_src
+
+Optional arguments:
+
+#+begin_src elisp
+;; Cap cell height at 3 lines (truncated cells end with "…")
+(markdown-table-wrap table-text 60 3)
+
+;; Measure widths from visible text only (for markdown-hide-markup)
+(markdown-table-wrap table-text 60 nil t)
+
+;; Suppress automatic empty rows between wrapped data rows
+(markdown-table-wrap table-text 60 nil nil t)
+#+end_src
+
+** Unwrapping and re-wrapping
+
+#+begin_src elisp
+(markdown-table-wrap
+ (markdown-table-wrap-unwrap previously-wrapped) new-width)
+#+end_src
+
+** Batch rendering
+
+Parse and measure once, render at each width:
+
+#+begin_src elisp
+(markdown-table-wrap-batch table-text '(40 60 80 120))
+#+end_src
+
+** Integration example
+
+#+begin_src elisp
+(defun my-wrap-table-at-point ()
+  "Wrap the pipe table at point to fit the window."
+  (interactive)
+  (save-excursion
+    (let* ((beg (progn (re-search-backward "^|" nil t)
+                       (line-beginning-position)))
+           (end (progn (re-search-forward "^[^|]" nil t)
+                       (line-beginning-position)))
+           (text (buffer-substring-no-properties beg (1- end)))
+           (wrapped (markdown-table-wrap
+                     text (window-width)
+                     nil                     ; max cell height
+                     markdown-hide-markup))) ; t when markup hidden
+      (unless (equal wrapped text)
+        (delete-region beg (1- end))
+        (goto-char beg)
+        (insert wrapped)))))
+#+end_src
+
+* Features
+
+- Markup-aware: bold, italic, links, code, images, strikethrough
+- Graceful degradation when columns are too narrow for markup
+- Proportional column-width allocation
+- Alignment preservation (=:---:=, =---:=, =:---=)
+- Cell height cap with ellipsis
+- Unwrap/re-wrap for resizing; batch rendering
+- Code fence awareness
+- Unicode-aware (CJK, combining marks, VS16 emoji)
+- Pure Elisp, no dependencies
+
+* API
+
+** Primary functions
+
+- ~(markdown-table-wrap TEXT WIDTH &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
+
+  Rewrite a pipe table to fit WIDTH.  Returns the wrapped string,
+  or TEXT unchanged when it already fits.  STRIP-MARKUP measures
+  widths from visible text (for =markdown-hide-markup=).  COMPACT
+  suppresses automatic empty rows between wrapped data rows.
+
+- ~(markdown-table-wrap-batch TEXT WIDTHS &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
+
+  Render at each width in WIDTHS.  Parses once.
+
+- ~(markdown-table-wrap-unwrap TEXT)~
+
+  Merge continuation rows back into logical rows.  Idempotent.
+
+The package also exposes =markdown-table-wrap-parse=,
+=markdown-table-wrap-cell=, =markdown-table-wrap-compute-widths=,
+=markdown-table-wrap-strip-markup=, =markdown-table-wrap-visible-width=,
+and =markdown-table-wrap-inside-code-fence-p=.  See their docstrings
+for details.
+
+All public functions are pure (except =inside-code-fence-p=).  No
+=defcustom= is defined; configuration is passed as arguments.
+
+* License
+
+GPL-3.0-or-later
