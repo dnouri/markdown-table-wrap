@@ -1,6 +1,7 @@
 #+title: markdown-table-wrap
 #+author: Daniel Nouri
 
+#+html: <a href="https://melpa.org/#/markdown-table-wrap"><img alt="MELPA" src="https://melpa.org/packages/markdown-table-wrap-badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/markdown-table-wrap/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/dnouri/markdown-table-wrap/actions/workflows/test.yml/badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/markdown-table-wrap/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/markdown-table-wrap/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
@@ -37,6 +38,37 @@ can be measured from visible text so that hidden markers do not
 waste space.
 
 * Installation
+
+Install from [[https://melpa.org/#/markdown-table-wrap][MELPA]]:
+
+#+begin_src
+M-x package-install RET markdown-table-wrap RET
+#+end_src
+
+If MELPA is not configured yet, add this to your init file, restart
+Emacs, and run =M-x package-refresh-contents= once:
+
+#+begin_src elisp
+(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+#+end_src
+
+If you use the library from your own code, load it with:
+
+#+begin_src elisp
+(require 'markdown-table-wrap)
+#+end_src
+
+If you prefer =use-package=:
+
+#+begin_src elisp
+(use-package markdown-table-wrap
+  :ensure t)
+#+end_src
+
+** Manual installation
+
+If you prefer a plain checkout, add the repository to your =load-path=
+and require the library:
 
 #+begin_src elisp
 (add-to-list 'load-path "/path/to/markdown-table-wrap")
