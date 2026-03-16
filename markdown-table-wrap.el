@@ -30,8 +30,12 @@
 
 ;; Rewrite GFM (GitHub Flavored Markdown) pipe tables so they fit a
 ;; given character width.  Cells that exceed their allocated column
-;; width are word-wrapped, producing multi-line rows that remain valid
-;; pipe-table syntax.
+;; width are word-wrapped by emitting additional pipe-table lines.
+;; The wrapped text is meant for readable source editing and
+;; round-tripping with `markdown-table-wrap-unwrap': wrapped header
+;; lines no longer form valid GFM tables, and wrapped body
+;; continuation lines and spacer lines are parsed as additional
+;; rows by Markdown renderers.
 ;;
 ;; The main entry point is `markdown-table-wrap':
 ;;
@@ -1106,9 +1110,13 @@ CELLS shorter than COL-WIDTHS are padded with empty strings."
 (defun markdown-table-wrap (text width &optional max-cell-height strip-markup
                                 compact)
   "Rewrite markdown pipe-table TEXT to fit WIDTH characters.
-Return wrapped pipe-table string.  When the table fits naturally,
-return it aligned (no wrapping needed).  When cells need wrapping,
-continuation lines have empty cells for non-wrapping columns.
+Return pipe-table-shaped text for readable source editing and
+round-tripping with `markdown-table-wrap-unwrap'.  When the table
+fits naturally, return it aligned (no wrapping needed).  When cells
+need wrapping, continuation lines have empty cells for non-wrapping
+columns.  Wrapped headers are no longer valid GFM tables, and
+wrapped body continuation lines are parsed as additional rows by
+Markdown renderers.
 
 MAX-CELL-HEIGHT, when non-nil, caps cell height and adds \"…\" to
 truncated cells.
@@ -1127,8 +1135,10 @@ alignment.
 When wrapping produces multi-line rows, an empty-cell row is
 automatically inserted between each logical data row for visual
 breathing room.  This makes row boundaries obvious in dense
-wrapped output.  No separator is added when all rows fit on a
-single line, since the table is already easy to read.
+wrapped output, but those spacer rows are also parsed as
+additional rows by Markdown renderers.  No separator is added when
+all rows fit on a single line, since the table is already easy to
+read.
 
 When COMPACT is non-nil, suppress these automatic separators.
 This produces denser output even when rows wrap.

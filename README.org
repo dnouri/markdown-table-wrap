@@ -29,10 +29,13 @@ given character width.  Inline markup survives wrapping.
 |          |        | *pool*       |
 #+end_example
 
-The output is valid GFM.  Bold, italic, code, links, images, and
-strikethrough markers are duplicated on each continuation line.
-When wrapping produces multi-line rows, empty rows are inserted
-between data rows for readability.  In buffers where
+The wrapped text is meant for readable source editing and
+round-tripping with =markdown-table-wrap-unwrap=.  It is not a
+semantic no-op for Markdown renderers: wrapped headers are no
+longer valid GFM tables, and wrapped body continuation lines and
+automatic spacer rows are parsed as additional rows.  Bold,
+italic, code, links, images, and strikethrough markers are
+duplicated on each continuation line.  In buffers where
 =markdown-hide-markup= conceals syntax characters, column widths
 can be measured from visible text so that hidden markers do not
 waste space.
@@ -96,6 +99,9 @@ Optional arguments:
 
 ** Unwrapping and re-wrapping
 
+Wrapped output is optimized for readable source, not for preserving
+exact GFM table semantics in Markdown-to-HTML renderers.
+
 #+begin_src elisp
 (markdown-table-wrap
  (markdown-table-wrap-unwrap previously-wrapped) new-width)
@@ -149,8 +155,12 @@ Parse and measure once, render at each width:
 
 - ~(markdown-table-wrap TEXT WIDTH &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
 
-  Rewrite a pipe table to fit WIDTH.  Returns the wrapped string,
-  or TEXT unchanged when it already fits.  STRIP-MARKUP measures
+  Rewrite a pipe table to fit WIDTH.  Returns pipe-table-shaped text
+  for readable source editing and round-tripping with
+  =markdown-table-wrap-unwrap=, or TEXT unchanged when it already
+  fits.  Wrapped headers are no longer valid GFM tables, and wrapped
+  body continuation lines and automatic spacer rows are parsed as
+  additional rows by Markdown renderers.  STRIP-MARKUP measures
   widths from visible text (for =markdown-hide-markup=).  COMPACT
   suppresses automatic empty rows between wrapped data rows.
 
@@ -160,7 +170,9 @@ Parse and measure once, render at each width:
 
 - ~(markdown-table-wrap-unwrap TEXT)~
 
-  Merge continuation rows back into logical rows.  Idempotent.
+  Merge continuation rows back into logical rows when their
+  boundaries remain detectable.  Best suited for text known to be
+  produced by =markdown-table-wrap=.
 
 The package also exposes =markdown-table-wrap-parse=,
 =markdown-table-wrap-cell=, =markdown-table-wrap-compute-widths=,
