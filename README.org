@@ -90,7 +90,7 @@ Optional arguments:
 ;; Cap cell height at 3 lines (truncated cells end with "…")
 (markdown-table-wrap table-text 60 3)
 
-;; Measure widths from visible text only (for markdown-hide-markup)
+;; Measure widths from visible text only (for modes that hide markup)
 (markdown-table-wrap table-text 60 nil t)
 
 ;; Suppress automatic empty rows between wrapped data rows
@@ -100,12 +100,19 @@ Optional arguments:
 ** Unwrapping and re-wrapping
 
 Wrapped output is optimized for readable source, not for preserving
-exact GFM table semantics in Markdown-to-HTML renderers.
+exact GFM table semantics in Markdown-to-HTML renderers.  For text
+already produced by =markdown-table-wrap=, unwrap first and then
+re-wrap:
 
 #+begin_src elisp
 (markdown-table-wrap
  (markdown-table-wrap-unwrap previously-wrapped) new-width)
 #+end_src
+
+For same-width editor commands on extracted table text, prefer
+=markdown-table-wrap-format-table-block= instead.  If you are composing
+lower-level pieces yourself, use =markdown-table-wrap-normalize-for-width=
+before calling =markdown-table-wrap=.
 
 ** Batch rendering
 
@@ -115,26 +122,89 @@ Parse and measure once, render at each width:
 (markdown-table-wrap-batch table-text '(40 60 80 120))
 #+end_src
 
-** Integration example
+** Integration examples
+
+The buffer helpers =markdown-table-wrap-table-bounds= and
+=markdown-table-wrap-table-regions= locate tables in the current
+buffer.  =markdown-table-wrap-format-table-block= handles the fiddly
+string part: it preserves leading indentation and a trailing newline,
+and it normalizes already-wrapped same-width output before rewrapping.
+The snippets below work with =markdown-mode=, =md-ts-mode=, and Emacs
+31's built-in =markdown-ts-mode=.  They default to =fill-column= so
+saved files stay stable across window sizes; if you prefer view-relative
+wrapping, replace =fill-column= with =(window-body-width)=.
+
+When wrapping produces multi-line data rows, =markdown-table-wrap=
+adds an empty pipe row between logical rows by default for readability;
+pass non-nil as the fifth argument to
+=markdown-table-wrap-format-table-block= if you prefer compact output.
+If your mode hides inline markup, pass non-nil as the fourth argument.
+If you rewrap tables across changing widths, prefer keeping the
+original table text and wrapping that again.
+
+*** Shared helper
 
 #+begin_src elisp
-(defun my-wrap-table-at-point ()
-  "Wrap the pipe table at point to fit the window."
+(defun my-markdown-table-wrap--replace-table-region (beg end)
+  (let* ((text (buffer-substring-no-properties beg end))
+         (final (markdown-table-wrap-format-table-block text fill-column)))
+    (unless (equal text final)
+      (let ((inhibit-read-only t))
+        (goto-char beg)
+        (delete-region beg end)
+        (insert final)))))
+#+end_src
+
+*** Wrap table at point
+
+This is the recommended everyday command:
+
+#+begin_src elisp
+(defun my-markdown-table-wrap-at-point ()
+  "Wrap the pipe table at point to `fill-column'."
+  (interactive)
+  (pcase-let ((`(,beg . ,end)
+               (or (markdown-table-wrap-table-bounds)
+                   (user-error "Point is not in a pipe table"))))
+    (save-excursion
+      (my-markdown-table-wrap--replace-table-region beg end))))
+
+(defun my-markdown-table-wrap-setup ()
+  (local-set-key (kbd "C-c C-w") #'my-markdown-table-wrap-at-point))
+
+(dolist (hook '(markdown-mode-hook md-ts-mode-hook markdown-ts-mode-hook))
+  (add-hook hook #'my-markdown-table-wrap-setup))
+#+end_src
+
+*** Wrap all tables in buffer
+
+Useful as a cleanup pass before committing or exporting:
+
+#+begin_src elisp
+(defun my-markdown-table-wrap-buffer ()
+  "Wrap all pipe tables in the current buffer."
   (interactive)
   (save-excursion
-    (let* ((beg (progn (re-search-backward "^|" nil t)
-                       (line-beginning-position)))
-           (end (progn (re-search-forward "^[^|]" nil t)
-                       (line-beginning-position)))
-           (text (buffer-substring-no-properties beg (1- end)))
-           (wrapped (markdown-table-wrap
-                     text (window-width)
-                     nil                     ; max cell height
-                     markdown-hide-markup))) ; t when markup hidden
-      (unless (equal wrapped text)
-        (delete-region beg (1- end))
-        (goto-char beg)
-        (insert wrapped)))))
+    (dolist (bounds (nreverse (markdown-table-wrap-table-regions
+                               (point-min) (point-max))))
+      (pcase-let ((`(,beg . ,end) bounds))
+        (my-markdown-table-wrap--replace-table-region beg end)))))
+#+end_src
+
+*** Wrap on save
+
+This is more aggressive, but convenient if you want modified Markdown
+buffers normalized on disk.  Using =fill-column= keeps the saved layout
+deterministic.  Emacs only runs =before-save-hook= when a save actually
+happens, so a freshly opened clean buffer may stay unchanged until you
+edit it or run =my-markdown-table-wrap-buffer= once.
+
+#+begin_src elisp
+(defun my-markdown-table-wrap-enable-on-save ()
+  (add-hook 'before-save-hook #'my-markdown-table-wrap-buffer nil t))
+
+(dolist (hook '(markdown-mode-hook md-ts-mode-hook markdown-ts-mode-hook))
+  (add-hook hook #'my-markdown-table-wrap-enable-on-save))
 #+end_src
 
 * Features
@@ -145,7 +215,9 @@ Parse and measure once, render at each width:
 - Alignment preservation (=:---:=, =---:=, =:---=)
 - Cell height cap with ellipsis
 - Unwrap/re-wrap for resizing; batch rendering
-- Code fence awareness
+- Buffer helpers that skip fenced code blocks
+- Editor-formatting helper for indentation-preserving integrations
+- Buffer-inspection helpers for editor integrations
 - Unicode-aware (CJK, combining marks, VS16 emoji)
 - Pure Elisp, no dependencies
 
@@ -161,27 +233,58 @@ Parse and measure once, render at each width:
   fits.  Wrapped headers are no longer valid GFM tables, and wrapped
   body continuation lines and automatic spacer rows are parsed as
   additional rows by Markdown renderers.  STRIP-MARKUP measures
-  widths from visible text (for =markdown-hide-markup=).  COMPACT
+  widths from visible text for modes that hide markup.  COMPACT
   suppresses automatic empty rows between wrapped data rows.
 
 - ~(markdown-table-wrap-batch TEXT WIDTHS &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
 
   Render at each width in WIDTHS.  Parses once.
 
+- ~(markdown-table-wrap-normalize-for-width TEXT WIDTH &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
+
+  Return TEXT unchanged, or its unwrapped source form when TEXT already
+  matches =markdown-table-wrap= output at WIDTH with the same options.
+  Preserve a trailing newline when TEXT has one.  Useful for idempotent
+  same-width editor commands on source tables.
+
+- ~(markdown-table-wrap-format-table-block TEXT WIDTH &optional MAX-CELL-HEIGHT STRIP-MARKUP COMPACT)~
+
+  Wrap extracted buffer text for reinsertion.  Preserves the leading
+  indentation of the first table line, preserves a trailing newline,
+  and normalizes already-wrapped same-width output before rendering.
+
 - ~(markdown-table-wrap-unwrap TEXT)~
 
-  Merge continuation rows back into logical rows when their
-  boundaries remain detectable.  Best suited for text known to be
-  produced by =markdown-table-wrap=.
+  Merge continuation rows back into logical rows when their boundaries
+  remain detectable.  Best suited for text known to be produced by
+  =markdown-table-wrap=.
+
+** Buffer helpers
+
+- ~(markdown-table-wrap-table-bounds &optional POS)~
+
+  Return the full bounds of the pipe table at POS in the current
+  buffer, or nil.  Skips tables inside fenced code blocks and
+  pipe-like text without a separator row.
+
+- ~(markdown-table-wrap-table-regions BEG END)~
+
+  Return all pipe-table regions overlapping BEG and END, in buffer
+  order.  Useful for buffer-wide commands and save hooks.
+
+- ~(markdown-table-wrap-inside-code-fence-p POS)~
+
+  Return non-nil when POS is inside a fenced code block.
 
 The package also exposes =markdown-table-wrap-parse=,
 =markdown-table-wrap-cell=, =markdown-table-wrap-compute-widths=,
-=markdown-table-wrap-strip-markup=, =markdown-table-wrap-visible-width=,
-and =markdown-table-wrap-inside-code-fence-p=.  See their docstrings
-for details.
+=markdown-table-wrap-strip-markup=, and
+=markdown-table-wrap-visible-width=.  See their docstrings for
+additional details.
 
-All public functions are pure (except =inside-code-fence-p=).  No
-=defcustom= is defined; configuration is passed as arguments.
+The string transformation functions are pure.  The buffer helpers
+inspect the current buffer but do not modify it.  No =defcustom=
+is defined; configuration is passed as arguments.
 
 * License
 

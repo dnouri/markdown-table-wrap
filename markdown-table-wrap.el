@@ -56,6 +56,17 @@
 ;;   (markdown-table-wrap
 ;;     (markdown-table-wrap-unwrap WRAPPED-TEXT) NEW-WIDTH)
 ;;
+;; For idempotent same-width editor commands on extracted table text,
+;; prefer `markdown-table-wrap-format-table-block'.  If you are
+;; composing the lower-level pieces yourself, use
+;; `markdown-table-wrap-normalize-for-width' before wrapping.
+;;
+;; For editor integrations, `markdown-table-wrap-table-bounds' finds
+;; the table at point, `markdown-table-wrap-table-regions' finds all
+;; table regions overlapping a buffer range, and
+;; `markdown-table-wrap-format-table-block' returns extracted table
+;; text ready to reinsert.
+;;
 ;; Features:
 ;; - Markup-aware wrapping: bold, italic, links, images, code
 ;;   (single and double backtick), and strikethrough spans are
@@ -68,8 +79,10 @@
 ;; - Optional cell-height cap with ellipsis truncation.
 ;; - Automatic row separators for visual breathing room when wrapping
 ;;   occurs (opt out with COMPACT).
-;; - Code-fence awareness: tables inside ``` or ~~~ blocks are
-;;   left untouched.
+;; - Buffer-helper code-fence awareness: table lookup skips ``` or
+;;   ~~~ blocks.
+;; - Editor-block formatter: preserves extracted indentation and a
+;;   trailing newline when reinserting wrapped tables.
 ;; - Unicode-aware width: CJK, combining characters, and VS16
 ;;   emoji measured correctly for terminal alignment.
 ;; - Backtick parity guard: cells whose wrapping would produce
@@ -736,16 +749,63 @@ in the output regardless of the strip-markup setting."
 
 ;;;; Table Parsing
 
+(defconst markdown-table-wrap--table-line-re "^[[:blank:]]*|"
+  "Regexp matching a pipe-table line in a buffer.")
+
+(defconst markdown-table-wrap--separator-cell-re
+  "\\`[[:space:]]*:?-+:?[[:space:]]*\\'"
+  "Regexp matching one markdown pipe-table separator cell.")
+
+(defun markdown-table-wrap--table-line-p (&optional line)
+  "Return non-nil when LINE or the current line begins with a pipe table.
+When LINE is non-nil, test that string.  Otherwise test the current
+buffer line at point."
+  (if line
+      (string-match-p markdown-table-wrap--table-line-re line)
+    (save-excursion
+      (beginning-of-line)
+      (looking-at-p markdown-table-wrap--table-line-re))))
+
+(defun markdown-table-wrap--separator-line-p (line)
+  "Return non-nil when LINE is a pipe-table separator row."
+  (let* ((trimmed (string-trim line))
+         (cells (and (string-prefix-p "|" trimmed)
+                     (string-suffix-p "|" trimmed)
+                     (markdown-table-wrap--split-table-row trimmed))))
+    (and cells
+         (cl-every (lambda (cell)
+                     (string-match-p markdown-table-wrap--separator-cell-re cell))
+                   cells))))
+
+(defun markdown-table-wrap--merge-header-visual-rows (visual-rows)
+  "Merge VISUAL-ROWS into a single header row.
+Each visual row is a list of cell strings.  Non-empty cell fragments in
+later rows are appended to the corresponding earlier cell with spaces."
+  (when visual-rows
+    (let* ((num-cols (apply #'max (mapcar #'length visual-rows)))
+           (merged (make-vector num-cols nil)))
+      (dolist (row visual-rows)
+        (cl-loop for cell in row for i from 0 do
+          (let ((trimmed (string-trim cell)))
+            (unless (string-empty-p trimmed)
+              (aset merged i
+                    (if (aref merged i)
+                        (concat (aref merged i) " " trimmed)
+                      trimmed))))))
+      (mapcar (lambda (cell) (or cell ""))
+              (append merged nil)))))
+
 (defun markdown-table-wrap-parse (text)
   "Parse markdown pipe-table TEXT into structured data.
 Return (HEADERS ALIGNS ROWS) where:
   HEADERS is a list of header cell strings (trimmed)
   ALIGNS is a list of alignment symbols: `left', `right', `center', or nil
   ROWS is a list of rows, each a list of cell strings (trimmed)
-Escaped pipes (`\\|') in cells are preserved and not treated as
-column separators."
+Multiple visual header lines before the separator are merged into one
+header row.  Escaped pipes (`\\|') in cells are preserved and not
+ treated as column separators."
   (let* ((lines (split-string text "\n" t))
-         (headers nil)
+         (header-vrs nil)
          (aligns nil)
          (rows nil)
          (seen-separator nil))
@@ -753,7 +813,7 @@ column separators."
       (let ((trimmed (string-trim line)))
         (cond
          ;; Separator line: |---|:---:|---:|
-         ((string-match-p "^|[-:|[:space:]]+|$" trimmed)
+         ((markdown-table-wrap--separator-line-p trimmed)
           (setq seen-separator t)
           (let ((cells (markdown-table-wrap--split-table-row trimmed)))
             (setq aligns
@@ -768,13 +828,15 @@ column separators."
                           cells))))
          ;; Header (before separator)
          ((not seen-separator)
-          (setq headers (markdown-table-wrap--split-table-row trimmed)))
+          (push (markdown-table-wrap--split-table-row trimmed) header-vrs))
          ;; Data rows (after separator)
          (t
           (push (markdown-table-wrap--split-table-row trimmed) rows)))))
-    (list headers
-          (or aligns (make-list (length headers) nil))
-          (nreverse rows))))
+    (let ((headers (markdown-table-wrap--merge-header-visual-rows
+                    (nreverse header-vrs))))
+      (list headers
+            (or aligns (make-list (length headers) nil))
+            (nreverse rows)))))
 
 ;;;; Column Width Computation
 
@@ -926,6 +988,169 @@ properties, so it is safe to call before `font-lock-ensure'."
         (setq fence-count (1+ fence-count))))
     (cl-oddp fence-count)))
 
+;;;; Buffer Inspection Helpers
+
+(defun markdown-table-wrap--table-block-has-separator-p (beg end)
+  "Return non-nil when the table block between BEG and END has a separator row."
+  (save-excursion
+    (goto-char beg)
+    (catch 'found
+      (while (< (point) end)
+        (when (markdown-table-wrap--separator-line-p
+               (buffer-substring-no-properties
+                (line-beginning-position) (line-end-position)))
+          (throw 'found t))
+        (forward-line 1))
+      nil)))
+
+(defun markdown-table-wrap--table-block-end ()
+  "Move point past the contiguous table block at point and return it.
+Point must start on a table line.  The return value is the beginning of
+the first non-table line, or `point-max' when the block reaches EOF."
+  (while (and (markdown-table-wrap--table-line-p)
+              (not (eobp)))
+    (forward-line 1))
+  (when (and (eobp)
+             (markdown-table-wrap--table-line-p))
+    (goto-char (point-max)))
+  (point))
+
+(defun markdown-table-wrap-table-bounds (&optional pos)
+  "Return bounds of the pipe table at POS, or nil.
+The result is a cons (BEG . END) covering the full table block, where
+END is the beginning of the first line after the table.  Return nil
+when POS is not on a pipe-table line, the contiguous block lacks a
+separator row, or the block is inside a fenced code block."
+  (save-excursion
+    (goto-char (or pos (point)))
+    (beginning-of-line)
+    (when (markdown-table-wrap--table-line-p)
+      (while (and (not (bobp))
+                  (save-excursion
+                    (forward-line -1)
+                    (markdown-table-wrap--table-line-p)))
+        (forward-line -1))
+      (let ((beg (line-beginning-position)))
+        (unless (markdown-table-wrap-inside-code-fence-p beg)
+          (let ((end (markdown-table-wrap--table-block-end)))
+            (when (markdown-table-wrap--table-block-has-separator-p beg end)
+              (cons beg end))))))))
+
+(defun markdown-table-wrap-table-regions (beg end)
+  "Return pipe-table regions overlapping BEG and END.
+Each element is a cons (TABLE-BEG . TABLE-END) as returned by
+`markdown-table-wrap-table-bounds'.  Tables are returned in buffer
+order, expanded to full bounds even when the region starts or ends in
+mid-table.  Tables inside fenced code blocks are skipped."
+  (let ((start (min beg end))
+        (limit (max beg end))
+        (regions nil))
+    (save-excursion
+      (goto-char start)
+      (beginning-of-line)
+      (while (< (point) limit)
+        (let ((bounds (markdown-table-wrap-table-bounds (point))))
+          (if bounds
+              (progn
+                (when (> (cdr bounds) start)
+                  (push bounds regions))
+                (goto-char (cdr bounds)))
+            (forward-line 1)))))
+    (nreverse regions)))
+
+;;;; Editor Formatting Helpers
+
+(defun markdown-table-wrap-normalize-for-width (text width
+                                                    &optional max-cell-height
+                                                    strip-markup compact)
+  "Return TEXT or its unwrapped source form for rendering at WIDTH.
+If TEXT already matches `markdown-table-wrap' output at WIDTH with the
+same MAX-CELL-HEIGHT, STRIP-MARKUP, and COMPACT arguments, return
+`markdown-table-wrap-unwrap' of TEXT so same-width rewrites are
+idempotent.  Preserve a trailing newline when TEXT has one.  Otherwise
+return TEXT unchanged.
+
+This helper is meant for editor integrations that operate on source
+Markdown tables but may be invoked repeatedly on already-wrapped output.
+For applications that rewrap views across changing widths, prefer
+storing canonical raw table text instead of reusing rendered output."
+  (let* ((trailing-newline (string-suffix-p "\n" text))
+         (bare-text (if trailing-newline
+                        (substring text 0 -1)
+                      text))
+         (unwrapped (markdown-table-wrap-unwrap bare-text))
+         (rewrapped (markdown-table-wrap unwrapped width
+                                         max-cell-height
+                                         strip-markup
+                                         compact)))
+    (if (equal bare-text rewrapped)
+        (if trailing-newline
+            (concat unwrapped "\n")
+          unwrapped)
+      text)))
+
+(defun markdown-table-wrap--table-block-indentation (text)
+  "Return the leading indentation of TEXT's first table line."
+  (if (string-match "\\`\\([[:blank:]]*\\)|" text)
+      (match-string 1 text)
+    ""))
+
+(defun markdown-table-wrap--deindent-table-block (text indentation)
+  "Remove INDENTATION from each table line in TEXT when present."
+  (if (or (string-empty-p text)
+          (string-empty-p indentation))
+      text
+    (mapconcat (lambda (line)
+                 (if (string-prefix-p indentation line)
+                     (substring line (length indentation))
+                   line))
+               (split-string text "\n" nil)
+               "\n")))
+
+(defun markdown-table-wrap--indent-table-block (text indentation)
+  "Prefix INDENTATION to each rendered table line in TEXT."
+  (if (or (string-empty-p text)
+          (string-empty-p indentation))
+      text
+    (mapconcat (lambda (line)
+                 (concat indentation line))
+               (split-string text "\n" nil)
+               "\n")))
+
+(defun markdown-table-wrap-format-table-block (text width
+                                                    &optional max-cell-height
+                                                    strip-markup compact)
+  "Return TEXT wrapped to WIDTH for reinsertion into a buffer.
+Preserve the leading indentation of the first table line and any
+trailing newline, normalize already-wrapped same-width output via
+`markdown-table-wrap-normalize-for-width', then render with
+`markdown-table-wrap'.  MAX-CELL-HEIGHT, STRIP-MARKUP, and COMPACT
+match the optional arguments of `markdown-table-wrap'.
+
+This helper is meant for editor integrations that extract a table block
+with `buffer-substring-no-properties' and then reinsert the result."
+  (let* ((trailing-newline (string-suffix-p "\n" text))
+         (bare-text (if trailing-newline
+                        (substring text 0 -1)
+                      text))
+         (indentation (markdown-table-wrap--table-block-indentation bare-text))
+         (source (markdown-table-wrap-normalize-for-width
+                  (markdown-table-wrap--deindent-table-block
+                   bare-text indentation)
+                  width
+                  max-cell-height
+                  strip-markup
+                  compact))
+         (wrapped (markdown-table-wrap source width
+                                       max-cell-height
+                                       strip-markup
+                                       compact))
+         (final (markdown-table-wrap--indent-table-block
+                 wrapped indentation)))
+    (if trailing-newline
+        (concat final "\n")
+      final)))
+
 ;;;; Table Unwrapping
 
 (defun markdown-table-wrap--merge-visual-rows (visual-rows)
@@ -1001,15 +1226,17 @@ The boundary-detection heuristic: within a logical row, the set of
 non-empty columns can only shrink.  When a previously-empty column
 reappears with content, a new logical row has started.
 
-Known limitation: when ALL columns wrap to the exact same height,
-no column ever goes empty, and the heuristic cannot detect row
-boundaries.  The entire table is treated as one logical row.  For
-pixel-perfect fidelity, store the original table.
+Known limitation: when row boundaries leave no signal in the visual
+rows, the heuristic cannot recover them reliably.  This includes some
+evenly wrapped tables and some ordinary multi-row source tables whose
+data rows keep every column non-empty.  For pixel-perfect fidelity,
+store the original table.
 
-This function is idempotent: unwrapping an already-unwrapped table
-returns it unchanged.  It is composable with `markdown-table-wrap':
-  (markdown-table-wrap (markdown-table-wrap-unwrap wrapped) new-width)
-is the correct resize pipeline."
+This function is best suited for text known to be produced by
+`markdown-table-wrap'.  For same-width editor commands on source
+Markdown tables, prefer `markdown-table-wrap-format-table-block' or,
+when composing lower-level pieces yourself,
+`markdown-table-wrap-normalize-for-width'."
   ;; Use the parser for alignment extraction (single source of truth
   ;; for separator detection and alignment parsing).  For row data,
   ;; we scan lines directly because the parser strips all-empty rows
@@ -1025,7 +1252,7 @@ is the correct resize pipeline."
         (cond
          ;; Separator line (same regex the parser uses)
          ((and (not found-sep)
-               (string-match-p "^|[-:|[:space:]]+|$" trimmed))
+               (markdown-table-wrap--separator-line-p trimmed))
           (setq found-sep t))
          ;; Header rows (before separator)
          ((not found-sep)
@@ -1037,8 +1264,7 @@ is the correct resize pipeline."
     (setq data-vrs (nreverse data-vrs))
     ;; Phase 2: Merge visual rows into logical rows
     (let* ((merged-headers
-            (when header-vrs
-              (car (markdown-table-wrap--merge-visual-rows header-vrs))))
+            (markdown-table-wrap--merge-header-visual-rows header-vrs))
            (merged-data
             (when data-vrs
               (markdown-table-wrap--merge-visual-rows data-vrs)))

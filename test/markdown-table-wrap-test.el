@@ -1254,6 +1254,261 @@ since the span cannot be broken without corrupting syntax."
     (insert "| real table |\n|---|\n| data |\n")
     (should-not (markdown-table-wrap-inside-code-fence-p (point-min)))))
 
+;;;; Buffer Inspection Helpers
+
+(defun markdown-table-wrap-test--replace-readme-table-region (beg end)
+  "Apply the README region-replacement helper to BEG and END."
+  (let* ((text (buffer-substring-no-properties beg end))
+         (final (markdown-table-wrap-format-table-block text fill-column)))
+    (unless (equal text final)
+      (let ((inhibit-read-only t))
+        (goto-char beg)
+        (delete-region beg end)
+        (insert final)))))
+
+(defun markdown-table-wrap-test--readme-wrap-buffer ()
+  "Apply the README buffer-wide wrapping example to the current buffer."
+  (save-excursion
+    (dolist (bounds (nreverse (markdown-table-wrap-table-regions
+                               (point-min) (point-max))))
+      (markdown-table-wrap-test--replace-readme-table-region
+       (car bounds) (cdr bounds)))))
+
+(defconst markdown-table-wrap-test--multiline-header-pseudo-table
+  (concat
+   "| Comman | Statu |\n"
+   "| d      | s     |\n"
+   "| ------ | ----- |\n"
+   "| short  | done  |\n")
+  "A wrapped-looking table block with multiple header lines.")
+
+(defconst markdown-table-wrap-test--continuation-value-pseudo-table
+  (concat
+   "| Cmd      | Desc            |\n"
+   "| -------- | --------------- |\n"
+   "| npm      | Install all     |\n"
+   "| install  | project deps    |\n"
+   "|          | from pkg        |\n"
+   "| npm test | Run tests       |\n")
+  "A wrapped-looking table block with continuation-style data rows.")
+
+(ert-deftest markdown-table-wrap-test-table-bounds-basic ()
+  "Return the full table region at point."
+  (with-temp-buffer
+    (insert "before\n| A | B |\n|---|---|\n| 1 | 2 |\nafter\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     "| A | B |\n|---|---|\n| 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-nil-without-separator ()
+  "Return nil for pipe-like text that is not a table."
+  (with-temp-buffer
+    (insert "| just | text |\n")
+    (goto-char (point-min))
+    (search-forward "just")
+    (should-not (markdown-table-wrap-table-bounds (point)))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-nil-with-invalid-separator ()
+  "Return nil when the separator row has no dashes."
+  (with-temp-buffer
+    (insert "| A | B |\n|   |   |\n| 1 | 2 |\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (should-not (markdown-table-wrap-table-bounds (point)))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-preserves-indentation ()
+  "Return bounds that preserve leading indentation on table lines."
+  (with-temp-buffer
+    (insert "  | A | B |\n  |---|---|\n  | 1 | 2 |\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     "  | A | B |\n  |---|---|\n  | 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-nil-inside-code-fence ()
+  "Return nil for table-like text inside fenced code blocks."
+  (with-temp-buffer
+    (insert "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (should-not (markdown-table-wrap-table-bounds (point)))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-from-header-line ()
+  "Return full bounds when point is on the header line."
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |\n")
+    (goto-char (point-min))
+    (search-forward "A")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     "| A | B |\n|---|---|\n| 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-from-separator-line ()
+  "Return full bounds when point is on the separator line."
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |\n")
+    (goto-char (point-min))
+    (search-forward "---")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     "| A | B |\n|---|---|\n| 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-at-eof-without-trailing-newline ()
+  "Return bounds for a table that ends at EOF without hanging."
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |")
+    (goto-char (point-min))
+    (search-forward "1")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     "| A | B |\n|---|---|\n| 1 | 2 |")))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-from-multiline-header-second-line ()
+  "Return the full block when point is on a pseudo-table header continuation line."
+  (with-temp-buffer
+    (insert "before\n")
+    (insert markdown-table-wrap-test--multiline-header-pseudo-table)
+    (insert "after\n")
+    (goto-char (point-min))
+    (search-forward "| d")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     markdown-table-wrap-test--multiline-header-pseudo-table)))))
+
+(ert-deftest markdown-table-wrap-test-table-bounds-from-continuation-value-line ()
+  "Return the full block when point is on a continuation-style value line."
+  (with-temp-buffer
+    (insert "before\n")
+    (insert markdown-table-wrap-test--continuation-value-pseudo-table)
+    (insert "after\n")
+    (goto-char (point-min))
+    (search-forward "from pkg")
+    (let ((bounds (markdown-table-wrap-table-bounds (point))))
+      (should bounds)
+      (should (equal (buffer-substring-no-properties
+                      (car bounds) (cdr bounds))
+                     markdown-table-wrap-test--continuation-value-pseudo-table)))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-finds-multiple-tables ()
+  "Return all table regions in a buffer region, skipping code fences."
+  (with-temp-buffer
+    (insert (concat
+             "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+             "```markdown\n| X | Y |\n|---|---|\n| 3 | 4 |\n```\n\n"
+             "| C | D |\n|---|---|\n| 5 | 6 |\n"))
+    (let ((regions (markdown-table-wrap-table-regions (point-min) (point-max))))
+      (should (= (length regions) 2))
+      (should (equal (mapcar (lambda (bounds)
+                               (buffer-substring-no-properties
+                                (car bounds) (cdr bounds)))
+                             regions)
+                     '("| A | B |\n|---|---|\n| 1 | 2 |\n"
+                       "| C | D |\n|---|---|\n| 5 | 6 |\n"))))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-expand-overlap ()
+  "Expand region matches to full table bounds when region starts inside a table."
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |\n\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (let* ((beg (point))
+           (end (point-max))
+           (regions (markdown-table-wrap-table-regions beg end)))
+      (should (= (length regions) 1))
+      (should (equal (buffer-substring-no-properties
+                      (caar regions) (cdar regions))
+                     "| A | B |\n|---|---|\n| 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-expand-overlap-at-end ()
+  "Expand region matches to full table bounds when region ends inside a table."
+  (with-temp-buffer
+    (insert "before\n| A | B |\n|---|---|\n| 1 | 2 |\nafter\n")
+    (goto-char (point-min))
+    (search-forward "1")
+    (let* ((beg (point-min))
+           (end (point))
+           (regions (markdown-table-wrap-table-regions beg end)))
+      (should (= (length regions) 1))
+      (should (equal (buffer-substring-no-properties
+                      (caar regions) (cdar regions))
+                     "| A | B |\n|---|---|\n| 1 | 2 |\n")))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-find-normal-and-pseudo-tables-skip-fenced-pseudo-tables ()
+  "Return normal and pseudo tables, but skip fenced pseudo-table blocks."
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |\n\n")
+    (insert "Paragraph.\n\n")
+    (insert markdown-table-wrap-test--multiline-header-pseudo-table)
+    (insert "\n```markdown\n")
+    (insert markdown-table-wrap-test--multiline-header-pseudo-table)
+    (insert "```\n\n")
+    (insert markdown-table-wrap-test--continuation-value-pseudo-table)
+    (let ((regions (markdown-table-wrap-table-regions (point-min) (point-max))))
+      (should (equal (mapcar (lambda (bounds)
+                               (buffer-substring-no-properties
+                                (car bounds) (cdr bounds)))
+                             regions)
+                     (list "| A | B |\n|---|---|\n| 1 | 2 |\n"
+                           markdown-table-wrap-test--multiline-header-pseudo-table
+                           markdown-table-wrap-test--continuation-value-pseudo-table))))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-expand-overlap-from-multiline-header-second-line ()
+  "Expand region matches when the region starts inside a pseudo-header line."
+  (with-temp-buffer
+    (insert "before\n")
+    (insert markdown-table-wrap-test--multiline-header-pseudo-table)
+    (insert "after\n")
+    (goto-char (point-min))
+    (search-forward "| d")
+    (let* ((beg (point))
+           (end (point-max))
+           (regions (markdown-table-wrap-table-regions beg end)))
+      (should (= (length regions) 1))
+      (should (equal (buffer-substring-no-properties
+                      (caar regions) (cdar regions))
+                     markdown-table-wrap-test--multiline-header-pseudo-table)))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-expand-overlap-at-continuation-value-line ()
+  "Expand region matches when the region ends inside a continuation-style value line."
+  (with-temp-buffer
+    (insert "before\n")
+    (insert markdown-table-wrap-test--continuation-value-pseudo-table)
+    (insert "after\n")
+    (goto-char (point-min))
+    (search-forward "from pkg")
+    (let* ((beg (point-min))
+           (end (point))
+           (regions (markdown-table-wrap-table-regions beg end)))
+      (should (= (length regions) 1))
+      (should (equal (buffer-substring-no-properties
+                      (caar regions) (cdar regions))
+                     markdown-table-wrap-test--continuation-value-pseudo-table)))))
+
+(ert-deftest markdown-table-wrap-test-table-regions-at-eof-without-trailing-newline ()
+  "Return the final table region at EOF without a trailing newline."
+  (with-temp-buffer
+    (insert "before\n\n| A | B |\n|---|---|\n| 1 | 2 |")
+    (let ((regions (markdown-table-wrap-table-regions (point-min) (point-max))))
+      (should (= (length regions) 1))
+      (should (equal (buffer-substring-no-properties
+                      (caar regions) (cdar regions))
+                     "| A | B |\n|---|---|\n| 1 | 2 |")))))
+
 ;;;; Backtick Parity Helper
 
 (ert-deftest markdown-table-wrap-test-odd-backtick-line-p-detects-odd ()
@@ -1397,6 +1652,152 @@ reappears with content."
          (parsed2 (markdown-table-wrap-parse twice)))
     (should (equal (nth 0 parsed1) (nth 0 parsed2)))
     (should (equal (nth 2 parsed1) (nth 2 parsed2)))))
+
+(ert-deftest markdown-table-wrap-test-normalize-for-width-keeps-unwrapped-multi-row-table ()
+  "Normalization keeps an ordinary multi-row source table unchanged."
+  (let ((input (concat
+                "| A | B | C |\n"
+                "|---|---|---|\n"
+                "| Authentication | In progress | OAuth2 refresh handling |\n"
+                "| Database | Planned | Backup rehearsal checklist |")))
+    (should (equal (markdown-table-wrap-normalize-for-width input 60)
+                   input))))
+
+(ert-deftest markdown-table-wrap-test-normalize-for-width-unwraps-same-width-output ()
+  "Normalization unwraps output already rendered at the target width."
+  (let* ((source (concat
+                  "| A | B |\n"
+                  "|---|---|\n"
+                  "| Authentication | OAuth2 implementation still needs token refresh handling |"))
+         (wrapped (markdown-table-wrap source 40))
+         (normalized (markdown-table-wrap-normalize-for-width wrapped 40)))
+    (should (equal (markdown-table-wrap normalized 40) wrapped))
+    (should (equal normalized (markdown-table-wrap-unwrap wrapped)))))
+
+(ert-deftest markdown-table-wrap-test-normalize-for-width-preserves-trailing-newline ()
+  "Normalization preserves a trailing newline on already-wrapped text."
+  (let* ((source (concat
+                  "| A | B |\n"
+                  "|---|---|\n"
+                  "| Authentication | OAuth2 implementation still needs token refresh handling |"))
+         (wrapped (concat (markdown-table-wrap source 40) "\n"))
+         (normalized (markdown-table-wrap-normalize-for-width wrapped 40)))
+    (should (string-suffix-p "\n" normalized))
+    (should (equal normalized
+                   (concat (markdown-table-wrap-unwrap
+                            (substring wrapped 0 -1))
+                           "\n")))))
+
+(ert-deftest markdown-table-wrap-test-format-table-block-preserves-indentation ()
+  "Formatting preserves the source indentation on every rendered line."
+  (let* ((source (concat
+                  "  | A | B |\n"
+                  "  |---|---|\n"
+                  "  | Authentication | OAuth2 implementation still needs token refresh handling |\n"))
+         (formatted (markdown-table-wrap-format-table-block source 40)))
+    (dolist (line (split-string (string-trim-right formatted "\n") "\n"))
+      (should (string-prefix-p "  |" line)))))
+
+(ert-deftest markdown-table-wrap-test-format-table-block-preserves-trailing-newline ()
+  "Formatting preserves a trailing newline from extracted buffer text."
+  (let* ((source (concat
+                  "| A | B |\n"
+                  "|---|---|\n"
+                  "| Authentication | OAuth2 implementation still needs token refresh handling |\n"))
+         (formatted (markdown-table-wrap-format-table-block source 40)))
+    (should (string-suffix-p "\n" formatted))))
+
+(ert-deftest markdown-table-wrap-test-format-table-block-normalizes-same-width-output ()
+  "Formatting is idempotent for already-wrapped text at the same width."
+  (let* ((source (concat
+                  "  | A | B |\n"
+                  "  |---|---|\n"
+                  "  | Authentication | OAuth2 implementation still needs token refresh handling |\n"))
+         (once (markdown-table-wrap-format-table-block source 40))
+         (twice (markdown-table-wrap-format-table-block once 40)))
+    (should (equal twice once))))
+
+(ert-deftest markdown-table-wrap-test-format-table-block-preserves-logical-rows-for-continuation-values ()
+  "Formatting preserves logical rows in recoverable continuation-style data."
+  (let* ((formatted (markdown-table-wrap-format-table-block
+                     markdown-table-wrap-test--continuation-value-pseudo-table
+                     40))
+         (parsed (markdown-table-wrap-parse
+                  (markdown-table-wrap-unwrap formatted))))
+    (should (equal (nth 0 parsed) '("Cmd" "Desc")))
+    (should (equal (nth 2 parsed)
+                   '(("npm install" "Install all project deps from pkg")
+                     ("npm test" "Run tests"))))))
+
+(ert-deftest markdown-table-wrap-test-format-table-block-preserves-merged-multiline-header-content ()
+  "Formatting preserves merged header content in wrapped-looking header blocks."
+  (let* ((formatted (markdown-table-wrap-format-table-block
+                     markdown-table-wrap-test--multiline-header-pseudo-table
+                     40))
+         (parsed (markdown-table-wrap-parse
+                  (markdown-table-wrap-unwrap formatted))))
+    (should (equal (nth 0 parsed)
+                   '("Comman d" "Statu s")))))
+
+(ert-deftest markdown-table-wrap-test-readme-buffer-example-preserves-row-boundaries ()
+  "The README buffer example keeps separate logical rows separate."
+  (with-temp-buffer
+    (let ((fill-column 60))
+      (insert (concat
+               "Intro text before the table.\n\n"
+               "| Feature | Status | Notes |\n"
+               "|---------|--------|-------|\n"
+               "| Auth | In progress | OAuth2 implementation still needs token refresh handling and a clearer audit logging story for support handoffs |\n"
+               "| Billing | Planned | Invoice export needs formatting review plus reconciliation notes that finance can approve before rollout |\n"))
+      (markdown-table-wrap-test--readme-wrap-buffer)
+      (goto-char (point-min))
+      (search-forward "Feature")
+      (let* ((bounds (markdown-table-wrap-table-bounds (point)))
+             (table-text (buffer-substring-no-properties
+                          (car bounds) (cdr bounds)))
+             (parsed (markdown-table-wrap-parse
+                      (markdown-table-wrap-unwrap table-text))))
+        (should (equal (nth 2 parsed)
+                       '(("Auth" "In progress" "OAuth2 implementation still needs token refresh handling and a clearer audit logging story for support handoffs")
+                         ("Billing" "Planned" "Invoice export needs formatting review plus reconciliation notes that finance can approve before rollout"))))))))
+
+(ert-deftest markdown-table-wrap-test-readme-buffer-example-preserves-indentation ()
+  "The README buffer example keeps table indentation intact."
+  (with-temp-buffer
+    (let ((fill-column 40))
+      (insert (concat
+               "- Nested list item\n\n"
+               "  | Feature | Notes |\n"
+               "  |---------|-------|\n"
+               "  | Auth | OAuth2 implementation still needs token refresh handling |\n"))
+      (markdown-table-wrap-test--readme-wrap-buffer)
+      (goto-char (point-min))
+      (search-forward "Feature")
+      (let* ((bounds (markdown-table-wrap-table-bounds (point)))
+             (table-text (buffer-substring-no-properties
+                          (car bounds) (cdr bounds))))
+        (dolist (line (split-string (string-trim-right table-text "\n") "\n"))
+          (should (string-prefix-p "  |" line)))))))
+
+(ert-deftest markdown-table-wrap-test-readme-buffer-example-is-idempotent ()
+  "The README buffer example can be applied twice without changing output."
+  (with-temp-buffer
+    (let ((fill-column 60))
+      (insert (concat
+               "Intro text before the table.\n\n"
+               "| Feature | Status | Notes |\n"
+               "|---------|--------|-------|\n"
+               "| Auth | In progress | OAuth2 implementation still needs token refresh handling and a clearer audit logging story for support handoffs |\n"
+               "| Billing | Planned | Invoice export needs formatting review plus reconciliation notes that finance can approve before rollout |\n\n"
+               "```markdown\n"
+               "| fake | table |\n"
+               "|------|-------|\n"
+               "| inside | fence |\n"
+               "```\n"))
+      (markdown-table-wrap-test--readme-wrap-buffer)
+      (let ((once (buffer-string)))
+        (markdown-table-wrap-test--readme-wrap-buffer)
+        (should (equal (buffer-string) once))))))
 
 (ert-deftest markdown-table-wrap-test-unwrap-header-wrapping ()
   "Wrapped header lines are merged back into a single header row."
