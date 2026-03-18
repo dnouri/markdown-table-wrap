@@ -214,7 +214,7 @@ Each ☺️ sequence is display-width 2 via our VS16 correction."
 ;;;; Table Metrics
 
 (ert-deftest markdown-table-wrap-test-compute-metrics-returns-vectors ()
-  "Table metrics returns natural-widths and min-word-widths as vectors."
+  "Table metrics returns natural-widths as a vector."
   (let* ((text "| Foo | Bar |\n|---|---|\n| Hello world | Baz |")
          (parsed (markdown-table-wrap-parse text))
          (headers (nth 0 parsed))
@@ -222,9 +222,7 @@ Each ☺️ sequence is display-width 2 via our VS16 correction."
          (metrics (markdown-table-wrap-compute-table-metrics
                    headers rows (length headers))))
     (should (vectorp (plist-get metrics :natural-widths)))
-    (should (vectorp (plist-get metrics :min-word-widths)))
-    (should (= (length (plist-get metrics :natural-widths)) 2))
-    (should (= (length (plist-get metrics :min-word-widths)) 2))))
+    (should (= (length (plist-get metrics :natural-widths)) 2))))
 
 (ert-deftest markdown-table-wrap-test-metrics-produce-same-widths ()
   "Using pre-computed metrics produces identical column widths."
@@ -772,6 +770,82 @@ subtract marker overhead (which is invisible)."
     (should (> (nth 0 widths) 3))
     (should (> (nth 1 widths) 3))))
 
+;; Shared test fixture: 4-column table with diverse natural widths.
+;; Natural widths: [46 22 29 85].
+(defconst markdown-table-wrap-test--wide-headers
+  '("App" "Model" "Candidate" "Rec"))
+(defconst markdown-table-wrap-test--wide-rows
+  '(("Basic validation agents (basic_epd, basic_lca)"
+     "gemini-3-flash-preview"
+     "gemini-3.1-flash-lite-preview"
+     "Test via eval - could reduce cost for simple QA, but verify accuracy does not regress")))
+
+(ert-deftest markdown-table-wrap-test-widths-content-rich-column-gets-more ()
+  "A column with more content gets proportionally more width.
+Sqrt-proportional allocation ensures that a column with 85 chars
+of wrappable prose gets more space than one with only 22 chars,
+even when the narrower column contains a long unbreakable token."
+  (let ((widths (markdown-table-wrap-compute-widths
+                 markdown-table-wrap-test--wide-headers
+                 markdown-table-wrap-test--wide-rows
+                 100 4)))
+    ;; Rec (natural=85) must get more width than Model (natural=22).
+    (should (> (nth 3 widths) (nth 1 widths)))))
+
+(ert-deftest markdown-table-wrap-test-widths-small-columns-favored ()
+  "Small columns receive proportionally more of their natural width.
+Sqrt dampening naturally favors narrow columns: a column with
+natural width 1 keeps its full width, and a date column (nat=10)
+retains most of it even when wider columns are heavily compressed."
+  (let ((widths (markdown-table-wrap-compute-widths
+                 '("#" "Task" "Due" "Notes")
+                 '(("1" "Implement authentication flow with SSO" "2026-03-20"
+                    "Blocked on identity provider configuration"))
+                 60 4)))
+    ;; "#" (nat=1) should keep its full width — it's already minimal.
+    (should (= (nth 0 widths) 1))
+    ;; "Due" (nat=10) should keep most of its width (>= 80%).
+    (should (>= (nth 2 widths) 8))
+    ;; "Task" and "Notes" are wider and should be compressed more.
+    (should (< (/ (float (nth 1 widths)) 39.0)
+               (/ (float (nth 2 widths)) 10.0)))))
+
+(ert-deftest markdown-table-wrap-test-widths-sum-uses-full-budget ()
+  "When shrinking, column widths sum to exactly the cell budget.
+Border overhead is 3×num-cols+1.  No space should be wasted when
+columns are compressed to fit."
+  (dolist (available '(60 80 100 120))
+    (let* ((num-cols 4)
+           (widths (markdown-table-wrap-compute-widths
+                    markdown-table-wrap-test--wide-headers
+                    markdown-table-wrap-test--wide-rows
+                    available num-cols))
+           (border-overhead (+ (* 3 num-cols) 1))
+           (cell-budget (- available border-overhead)))
+      (should (= (apply #'+ widths) cell-budget)))))
+
+(ert-deftest markdown-table-wrap-test-widths-monotonic ()
+  "Every column width is monotonically non-decreasing as width grows.
+Widening the terminal must never shrink any column."
+  (dolist (nats '((2 12 11 93) (46 22 29 85)
+                  (4 22 7 6 5 10 10 35) (18 30 16 29)))
+    (let* ((headers (cl-loop for i below (length nats)
+                             collect (format "C%d" i)))
+           (row (make-list (length nats) "x"))
+           (num-cols (length nats))
+           (prev nil))
+      ;; Fake natural widths by using cells of exactly those widths.
+      (setq row (cl-loop for n in nats
+                         collect (make-string n ?x)))
+      (cl-loop for w from 20 to 150 do
+               (let ((widths (markdown-table-wrap-compute-widths
+                              headers (list row) w num-cols)))
+                 (when prev
+                   (dotimes (i num-cols)
+                     (should-not
+                      (< (nth i widths) (nth i prev)))))
+                 (setq prev widths))))))
+
 (ert-deftest markdown-table-wrap-test-widths-extremely-narrow ()
   "Extreme narrowing gives at least 1 char per column."
   (let ((widths (markdown-table-wrap-compute-widths
@@ -1081,30 +1155,6 @@ All non-separator lines should have equal display width."
         (should (> expected-w 0))
         (dolist (w (cdr widths))
           (should (= w expected-w)))))))
-
-;;;; Longest Word Width
-
-(ert-deftest markdown-table-wrap-test-longest-word-width-default-no-strip ()
-  "Longest word width uses raw width by default (no stripping)."
-  (should (= (markdown-table-wrap--longest-word-width "hello world") 5))
-  (should (= (markdown-table-wrap--longest-word-width "**bold** normal") 8))
-  (should (= (markdown-table-wrap--longest-word-width
-              "[link](http://example.com)") 26))
-  (should (= (markdown-table-wrap--longest-word-width "") 0)))
-
-(ert-deftest markdown-table-wrap-test-longest-word-width-with-strip ()
-  "Longest word width strips markup when strip-markup is t."
-  (let ((markdown-table-wrap--strip-markup t))
-    (should (= (markdown-table-wrap--longest-word-width "hello world") 5))
-    (should (= (markdown-table-wrap--longest-word-width "**bold** normal") 6))
-    (should (= (markdown-table-wrap--longest-word-width
-                "[link](http://example.com)") 4))
-    (should (= (markdown-table-wrap--longest-word-width "") 0))))
-
-(ert-deftest markdown-table-wrap-test-longest-word-width-capped ()
-  "Longest word width respects the max-width cap."
-  (should (= (markdown-table-wrap--longest-word-width
-              "superlongword" 5) 5)))
 
 ;;;; Truncate Cell Lines
 
@@ -1668,12 +1718,11 @@ they are wider by design (preserving markup integrity)."
             (ert-info ((format "T%d w%d: %d separators" tbl-idx width sep-count))
               (should (= sep-count 1)))))))))
 
-(ert-deftest markdown-table-wrap-test-e2e-overflow-is-markup ()
+(ert-deftest markdown-table-wrap-test-e2e-overflow-is-unbreakable ()
   "Lines that exceed the target width do so only because of unbreakable
-markup tokens (links, images, bold-italic spans).  Verify that every
-overflow line contains at least one recognized markup span whose
-visible width exceeds the column allocation.  This ensures overflow
-is intentional (preserving markup) rather than a padding/alignment bug."
+content: markup spans (links, images, bold-italic) or wide characters
+(CJK) whose display width exceeds the column allocation.  This ensures
+overflow is intentional rather than a padding/alignment bug."
   (let ((tables (markdown-table-wrap-test--fixture-tables))
         (widths markdown-table-wrap-test--e2e-widths))
     (cl-loop for tbl in tables for tbl-idx from 1 do
@@ -1683,23 +1732,25 @@ is intentional (preserving markup) rather than a padding/alignment bug."
                  (lines (split-string wrapped "\n")))
             (cl-loop for line in lines for line-no from 1 do
               (when (> (string-width line) width)
-                ;; At least one cell must have a recognized markup token
                 (let* ((cells (markdown-table-wrap-test--extract-cells line))
-                       (has-markup
+                       (has-unbreakable
                         (cl-some
                          (lambda (cell)
                            (let ((trimmed (string-trim cell)))
                              (and (> (length trimmed) 0)
-                                  (cl-some
-                                   (lambda (tok)
-                                     (markdown-table-wrap--markup-span-parts tok))
-                                   (markdown-table-wrap--tokenize-cell-text
-                                    trimmed)))))
+                                  (or (cl-some
+                                       (lambda (tok)
+                                         (markdown-table-wrap--markup-span-parts tok))
+                                       (markdown-table-wrap--tokenize-cell-text
+                                        trimmed))
+                                      (cl-some
+                                       (lambda (ch) (> (char-width ch) 1))
+                                       trimmed)))))
                          cells)))
-                  (ert-info ((format "T%d w%d L%d: overflow w/o markup, width=%d"
+                  (ert-info ((format "T%d w%d L%d: overflow w/o cause, width=%d"
                                      tbl-idx width line-no
                                      (string-width line)))
-                    (should has-markup)))))))))))
+                    (should has-unbreakable)))))))))))
 
 (ert-deftest markdown-table-wrap-test-e2e-height-cap ()
   "When max-cell-height is set, no logical row exceeds that many lines."

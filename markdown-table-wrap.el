@@ -63,7 +63,10 @@
 ;; - Graceful degradation: when a column is too narrow for markup
 ;;   overhead, markers are dropped and inner text is wrapped as
 ;;   plain text, preserving legibility over formatting.
-;; - Proportional column-width allocation based on content.
+;; - Waterfill column-width allocation: wider columns get more space
+;;   (proportional to sqrt of content width) but the effect is
+;;   dampened so narrow columns aren't starved.  Monotonic — widening
+;;   the terminal never shrinks any column.
 ;; - Alignment preservation (left, right, center).
 ;; - Optional cell-height cap with ellipsis truncation.
 ;; - Automatic row separators for visual breathing room when wrapping
@@ -98,8 +101,7 @@
   "When non-nil, strip inline markdown syntax before measuring width.
 This variable controls all width measurement in the package:
 `markdown-table-wrap-visible-width', `markdown-table-wrap-cell',
-`markdown-table-wrap--pad-cell', and `markdown-table-wrap--longest-word-width'
-all read it.
+and `markdown-table-wrap--pad-cell' all read it.
 
 The main entry point `markdown-table-wrap' binds this via `let'
 based on its STRIP-MARKUP argument.  If you call lower-level public
@@ -307,21 +309,6 @@ Width measurement respects `markdown-table-wrap--strip-markup'."
                            cell
                            (make-string (- padding-needed left-pad) ?\s))))
         (_ (concat cell (make-string padding-needed ?\s)))))))
-
-(defun markdown-table-wrap--longest-word-width (s &optional max-width)
-  "Return width of the longest whitespace-delimited word in S.
-When `markdown-table-wrap--strip-markup' is non-nil, strip markdown
-markup before splitting and measuring.  Otherwise, use raw text.
-Width measurement uses `markdown-table-wrap--display-width' for
-VS16 emoji correction.  Cap at MAX-WIDTH if given."
-  (let* ((measured (if markdown-table-wrap--strip-markup
-                      (markdown-table-wrap-strip-markup s)
-                    s))
-         (words (split-string measured "[ \t]+" t))
-         (longest 0))
-    (dolist (w words)
-      (setq longest (max longest (markdown-table-wrap--display-width w))))
-    (if max-width (min longest max-width) longest)))
 
 (defun markdown-table-wrap--tokenize-cell-text (text)
   "Split TEXT into tokens, keeping markdown markup spans intact.
@@ -788,8 +775,8 @@ Column widths are stored internally as vectors for O(1) random
 access (cf. `shr-table-widths' in shr.el).  The return value is
 a plain list for callers that iterate with `dolist' or `cl-mapcar'.
 
-Proportional shrinking distributes available space based on each
-column's grow potential (natural width minus minimum word width).
+Shrinking uses a waterfill algorithm with sqrt-dampened weights —
+see `markdown-table-wrap-distribute-widths'.
 
 This is a convenience wrapper around `markdown-table-wrap-compute-table-metrics'
 and `markdown-table-wrap-distribute-widths'.  When rendering the same table at
@@ -802,114 +789,101 @@ the width-independent metrics."
 (defun markdown-table-wrap-compute-table-metrics (headers rows num-cols)
   "Compute width-independent column metrics for HEADERS and ROWS.
 NUM-COLS is the number of columns.
-Return a plist (:natural-widths VEC :min-word-widths VEC) where each
-vector has NUM-COLS elements.
-
-Natural widths are the maximum visible width of any cell in each column.
-Minimum word widths are the longest unbreakable word in each column,
-capped at 30 characters.
+Return a plist (:natural-widths VEC) where the vector has NUM-COLS
+elements.  Each element is the maximum visible width of any cell
+in that column.
 
 These metrics depend only on cell content, not on the target rendering
 width, so they can be computed once and reused across multiple calls to
 `markdown-table-wrap-distribute-widths'."
-  (let ((max-unbroken-word-width 30)
-        (natural-widths (make-vector num-cols 0))
-        (min-word-widths (make-vector num-cols 1)))
+  (let ((natural-widths (make-vector num-cols 0)))
     ;; Measure headers
     (cl-loop for cell in headers
              for i from 0 below num-cols do
              (aset natural-widths i
                    (max (aref natural-widths i)
-                        (markdown-table-wrap-visible-width cell)))
-             (aset min-word-widths i
-                   (max (aref min-word-widths i)
-                        (markdown-table-wrap--longest-word-width
-                         cell max-unbroken-word-width))))
+                        (markdown-table-wrap-visible-width cell))))
     ;; Measure data rows
     (dolist (row rows)
       (cl-loop for cell in row
                for i from 0 below num-cols do
                (aset natural-widths i
                      (max (aref natural-widths i)
-                          (markdown-table-wrap-visible-width cell)))
-               (aset min-word-widths i
-                     (max (aref min-word-widths i)
-                          (markdown-table-wrap--longest-word-width
-                           cell max-unbroken-word-width)))))
-    (list :natural-widths natural-widths
-          :min-word-widths min-word-widths)))
+                          (markdown-table-wrap-visible-width cell)))))
+    (list :natural-widths natural-widths)))
 
 (defun markdown-table-wrap-distribute-widths (metrics available-width num-cols)
   "Distribute AVAILABLE-WIDTH across columns using pre-computed METRICS.
 METRICS is a plist as returned by `markdown-table-wrap-compute-table-metrics'.
 NUM-COLS is the number of columns.
-Return a list of column widths (integers)."
+Return a list of column widths (integers).
+
+When all columns fit at their natural width, return those widths
+unchanged.  Otherwise use a waterfill algorithm with sqrt-dampened
+weights: find the unique level L such that
+
+  sum_i min(nat_i, L * sqrt(nat_i)) = budget
+
+then round via Webster/Sainte-Laguë priorities.  This is
+monotonic — widening the terminal never shrinks any column."
   (let* ((natural-widths (plist-get metrics :natural-widths))
-         (min-word-widths (plist-get metrics :min-word-widths))
          (border-overhead (+ (* 3 num-cols) 1))
-         (available-for-cells (- available-width border-overhead))
-         (min-col-w (copy-sequence min-word-widths))
-         (min-cells-width (markdown-table-wrap--vsum min-word-widths)))
-    (when (> min-cells-width available-for-cells)
-      (setq min-col-w (make-vector num-cols 1))
-      (let ((remaining (- available-for-cells num-cols)))
-        (when (> remaining 0)
-          (let ((total-weight
-                 (cl-loop for i below num-cols
-                          sum (max 0 (1- (aref min-word-widths i))))))
-            (dotimes (i num-cols)
-              (let* ((weight (max 0 (1- (aref min-word-widths i))))
-                     (growth (if (> total-weight 0)
-                                 (floor (* (/ (float weight) total-weight)
-                                           remaining))
-                               0)))
-                (aset min-col-w i (+ (aref min-col-w i) growth))))
-            ;; Distribute rounding leftovers
-            (let* ((allocated (- (markdown-table-wrap--vsum min-col-w) num-cols))
-                   (leftover (- remaining allocated)))
+         (available (max num-cols (- available-width border-overhead)))
+         (total-natural (+ (markdown-table-wrap--vsum natural-widths)
+                           border-overhead)))
+    (if (<= total-natural available-width)
+        (append natural-widths nil)
+      (let* ((col-w (make-vector num-cols 0))
+             ;; Precompute sqrt weights.
+             (weights (vconcat
+                       (cl-loop for i below num-cols
+                                collect (sqrt (max 1.0
+                                                   (float (aref natural-widths i)))))))
+             ;; Sort column indices by ascending weight (ascending
+             ;; nat/weight ratio) so the analytical scan can peel
+             ;; off capped columns from the small end first.
+             (order (sort (number-sequence 0 (1- num-cols))
+                          (lambda (a b)
+                            (< (aref weights a) (aref weights b)))))
+             ;; Find the continuous waterfill level.
+             (rem-budget (float available))
+             (rem-weight (cl-loop for i below num-cols
+                                  sum (aref weights i)))
+             (level 1.0e10))
+        (dolist (i order)
+          (let ((candidate (/ rem-budget (max 1.0e-9 rem-weight))))
+            (cond
+             ((<= candidate 0.0)
+              (setq level 0.0))
+             ((>= (* candidate (aref weights i))
+                   (aref natural-widths i))
+              ;; Column i is capped at natural — remove from pool.
+              (setq rem-budget (- rem-budget (float (aref natural-widths i))))
+              (setq rem-weight (- rem-weight (aref weights i))))
+             (t
+              ;; Found the level; all remaining columns are uncapped.
+              (setq level candidate)))))
+        ;; Continuous allocations → floor, respecting bounds [1, nat].
+        (dotimes (i num-cols)
+          (aset col-w i
+                (min (aref natural-widths i)
+                     (max 1 (floor (* level (aref weights i)))))))
+        ;; Distribute rounding remainder via Webster priorities:
+        ;; priority_i = weight_i / (2 * current_i + 1).
+        (let ((diff (- available (markdown-table-wrap--vsum col-w))))
+          (while (> diff 0)
+            (let ((best-i -1) (best-pri -1.0))
               (dotimes (i num-cols)
-                (when (> leftover 0)
-                  (aset min-col-w i (1+ (aref min-col-w i)))
-                  (setq leftover (1- leftover))))))))
-      (setq min-cells-width (markdown-table-wrap--vsum min-col-w)))
-    ;; Compute final column widths
-    (let ((total-natural (+ (markdown-table-wrap--vsum natural-widths)
-                            border-overhead)))
-      (if (<= total-natural available-width)
-          ;; Everything fits naturally
-          (cl-loop for i below num-cols
-                   collect (max (aref natural-widths i)
-                                (aref min-col-w i)))
-        ;; Need to shrink: distribute extra space proportional to grow potential
-        (let* ((total-grow-potential
-                (cl-loop for i below num-cols
-                         sum (max 0 (- (aref natural-widths i)
-                                       (aref min-col-w i)))))
-               (extra-width (max 0 (- available-for-cells min-cells-width)))
-               (col-w (make-vector num-cols 0)))
-          (dotimes (i num-cols)
-            (let* ((min-w (aref min-col-w i))
-                   (nat (aref natural-widths i))
-                   (delta (max 0 (- nat min-w)))
-                   (grow (if (> total-grow-potential 0)
-                             (floor (* (/ (float delta)
-                                          total-grow-potential)
-                                       extra-width))
-                           0)))
-              (aset col-w i (+ min-w grow))))
-          (let ((remaining (- available-for-cells
-                              (markdown-table-wrap--vsum col-w))))
-            ;; Give remaining space to columns still under natural width
-            (while (> remaining 0)
-              (let ((grew nil))
-                (dotimes (i num-cols)
-                  (when (and (> remaining 0)
-                             (< (aref col-w i) (aref natural-widths i)))
-                    (aset col-w i (1+ (aref col-w i)))
-                    (setq remaining (1- remaining))
-                    (setq grew t)))
-                (unless grew (setq remaining 0))))
-            (append col-w nil)))))))
+                (when (< (aref col-w i) (aref natural-widths i))
+                  (let ((pri (/ (aref weights i)
+                                (1+ (* 2.0 (float (aref col-w i)))))))
+                    (when (> pri best-pri)
+                      (setq best-i i best-pri pri)))))
+              (if (>= best-i 0)
+                  (progn (aset col-w best-i (1+ (aref col-w best-i)))
+                         (setq diff (1- diff)))
+                (setq diff 0)))))
+        (append col-w nil)))))
 
 ;;;; Code Fence Detection
 
