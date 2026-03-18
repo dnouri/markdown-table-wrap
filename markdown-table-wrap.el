@@ -5,7 +5,7 @@
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/markdown-table-wrap
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: text, markdown, tables
 
